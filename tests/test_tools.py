@@ -1,3 +1,4 @@
+import asyncio
 import pathlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -173,6 +174,56 @@ class TestGetPictures:
 
         mock_text_blob.assert_called_once_with("...", font)
         canvas.drawTextBlob.assert_called_once_with(mock_text_blob.return_value, x, y, paint)
+
+
+class TestGetClient:
+    """The shared HTTP client must be rebuilt when the event loop changes."""
+
+    @pytest.fixture(autouse=True)
+    def reset_client_state(self):
+        import dynrender_skia._io as io_module
+
+        old_client, old_loop = io_module._client, io_module._client_loop
+        io_module._client, io_module._client_loop = None, None
+        yield
+        io_module._client, io_module._client_loop = old_client, old_loop
+
+    @pytest.mark.asyncio
+    async def test_get_client_reused_on_same_loop(self) -> None:
+        import dynrender_skia._io as io_module
+
+        client_a = await io_module._get_client()
+        client_b = await io_module._get_client()
+        assert client_a is client_b
+
+    def test_get_client_recreated_on_new_event_loop(self) -> None:
+        import dynrender_skia._io as io_module
+
+        # asyncio.run creates (and closes) a fresh event loop per call, so the
+        # second call runs on a different loop than the one that built the
+        # client. Reusing the stale client would raise "Event loop is closed".
+        client_a = asyncio.run(io_module._get_client())
+        client_b = asyncio.run(io_module._get_client())
+        assert client_a is not client_b
+
+    def test_fetch_images_after_loop_switch(
+        self, mock_img_url: str, img_path: pathlib.Path
+    ) -> None:
+        import dynrender_skia._io as io_module
+
+        # Simulate a bot that creates a new event loop per render: prime the
+        # client on a throwaway loop (which is then closed), and fetch again on
+        # a second loop — must not reuse the stale client.
+        asyncio.run(io_module._get_client())
+
+        async def do_fetch():
+            async with respx.mock(base_url=mock_img_url) as mock:
+                img_content = img_path.read_bytes()
+                mock.get(mock_img_url).respond(content=img_content, status_code=200)
+                return await fetch_images(mock_img_url, None)
+
+        image = asyncio.run(do_fetch())
+        assert image is not None
 
 
 @pytest.mark.asyncio

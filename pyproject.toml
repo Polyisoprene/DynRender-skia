@@ -1,6 +1,6 @@
 [project]
 name = "dynrender_skia"
-version = "0.3.0"
+version = "0.3.1"
 description = "使用skia-python将BiliBili动态渲染为图片"
 authors = [
     { name = "DMC", email = "lzxder@outlook.com" },

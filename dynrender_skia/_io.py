@@ -1,6 +1,7 @@
 """Image fetching — shared HTTP connection pool and request helpers."""
 
 import asyncio
+import threading
 from typing import Optional, Union
 
 import httpx
@@ -14,21 +15,34 @@ _IMG_HEADERS = {
 }
 
 _client: Optional[httpx.AsyncClient] = None
-_client_lock = asyncio.Lock()
+_client_loop: Optional[asyncio.AbstractEventLoop] = None
+_client_lock = threading.Lock()
 
 
 async def _get_client() -> httpx.AsyncClient:
-    """Return the module-level shared HTTP client (lazy init, thread-safe)."""
-    global _client
-    if _client is not None and not _client.is_closed:
+    """Return the shared HTTP client for the current event loop (lazy init, thread-safe).
+
+    httpcore pools connections inside the client, and each pooled connection is
+    bound to the event loop it was created on. Reusing a client created on a
+    different (possibly closed) loop raises "Event loop is closed", so the
+    client is rebuilt whenever the running loop changes.
+    """
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    if _client is not None and not _client.is_closed and _client_loop is loop:
         return _client
-    async with _client_lock:
-        if _client is None or _client.is_closed:
-            _client = httpx.AsyncClient(
-                transport=httpx.AsyncHTTPTransport(retries=5),
-                headers=_IMG_HEADERS,
-                timeout=httpx.Timeout(30.0),
-            )
+    with _client_lock:  # creation is synchronous (no I/O), safe to hold across threads
+        if _client is not None and not _client.is_closed and _client_loop is loop:
+            return _client
+        # Drop the stale client instead of closing it: a closed loop has already
+        # cleaned up its transports, and closing it here could itself raise
+        # "Event loop is closed" or race an in-flight render on a live loop.
+        _client = httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(retries=5),
+            headers=_IMG_HEADERS,
+            timeout=httpx.Timeout(30.0),
+        )
+        _client_loop = loop
         return _client
 
 
